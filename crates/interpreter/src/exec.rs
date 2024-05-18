@@ -16,6 +16,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use portable_atomic::*;
+
 use crate::error::*;
 use crate::module::*;
 use crate::syntax::*;
@@ -983,40 +985,40 @@ impl<'m> Thread<'m> {
                 return Err(trap());
             }
             #[cfg(feature = "threads")]
-            IAtomicLoad(_, _) => {
+            IAtomicLoad(n, m) => {
                 #[cfg(feature = "debug")]
                 println!("Atomic load");
-                return Err(trap());
+                self.atomic_load(store.mem(inst_id, 0), NumType::i(n), n.into(), Sx::U, m)?;
             }
             #[cfg(feature = "threads")]
-            IAtomicLoad_(_, _, _) => {
+            IAtomicLoad_(b, s, m) => {
                 #[cfg(feature = "debug")]
                 println!("Atomic load");
-                return Err(trap());
+                self.atomic_load(store.mem(inst_id, 0), NumType::i(b.into()), b.into(), s, m)?;
             }
             #[cfg(feature = "threads")]
-            IAtomicStore(_, _) => {
+            IAtomicStore(n, m) => {
                 #[cfg(feature = "debug")]
                 println!("Atomic store");
-                return Err(trap());
+                self.atomic_store(store.mem(inst_id, 0), NumType::i(n), n.into(), m)?;
             }
             #[cfg(feature = "threads")]
-            IAtomicStore_(_, _) => {
+            IAtomicStore_(b, m) => {
                 #[cfg(feature = "debug")]
                 println!("Atomic store");
-                return Err(trap());
+                self.atomic_store(store.mem(inst_id, 0), NumType::i(b.into()), b.into(), m)?;
             }
             #[cfg(feature = "threads")]
-            AtomicOp(_op, _, _) => {
+            AtomicOp(n, op, m) => {
                 #[cfg(feature = "debug")]
-                println!("Atomic binop {:?} ", _op);
-                return Err(trap());
+                println!("Atomic binop {:?} ", op);
+                self.atomic_binop(op, store.mem(inst_id, 0), NumType::i(n), n.into(), Sx::U, m)?;
             }
             #[cfg(feature = "threads")]
-            AtomicOp_(_op, _, _, _) => {
+            AtomicOp_(b, op, s, m) => {
                 #[cfg(feature = "debug")]
-                println!("Atomic binopP {:?} ", _op);
-                return Err(trap());
+                println!("Atomic binopP {:?} ", op);
+                self.atomic_binop(op, store.mem(inst_id, 0), NumType::i(b.into()), b.into(), s, m)?;
             }
             #[cfg(feature = "threads")]
             AtomicExchange(_, _) => {
@@ -1218,6 +1220,154 @@ impl<'m> Thread<'m> {
             _ => unreachable!(),
         };
         self.push_value(c);
+        Ok(())
+    }
+
+    // let i = self.pop_value().unwrap_i32();
+    // let mem = store.mem(inst_id, 0);
+    // let n_len = usize::from(n);
+    // let mem2 = match self.mem_slice(mem, memarg, i, n_len/8) {
+    // None => return Err(trap()),
+    // Some(x) => x,
+    // };
+    // unsafe {
+    // let ptr = mem2.as_mut_ptr() as * mut i32;
+    // let atomic_i32 = AtomicI32::from_ptr(ptr);
+    // let return_value = atomic_i32.load(portable_atomic::Ordering::SeqCst);
+    // #[cfg(feature = "debug")]
+    // println!("Atomic load loaded {}", return_value);
+    // self.push_value(Val::I32(return_value.try_into().unwrap()));
+    // }
+
+
+    fn atomic_binop(
+        &mut self, op: IBinOp, mem: &mut Memory<'m>, t: NumType, n: usize, s: Sx, m: MemArg,
+    ) -> Result<(), Error> {
+        let c = self.pop_value();
+        let i = self.pop_value().unwrap_i32();
+        let mem = match self.mem_slice(mem, m, i, n / 8) {
+            None => return Err(trap()),
+            Some(x) => x,
+        };
+        macro_rules! convert {
+            ($T:ident, $t:ident, $s:ident) => {
+                unsafe {
+                match (op) {
+                    IBinOp::Add => {
+                        paste::paste! { Val::$T([< Atomic $s:upper >]::from_ptr(mem.as_mut_ptr() as *mut $s).fetch_add((c.[<unwrap_ $T:lower>]() as $s), portable_atomic::Ordering::SeqCst) as $t)}
+                    },
+                    IBinOp::Sub => {
+                        paste::paste! { Val::$T([< Atomic $s:upper >]::from_ptr(mem.as_mut_ptr() as *mut $s).fetch_sub((c.[<unwrap_ $T:lower>]() as $s), portable_atomic::Ordering::SeqCst) as $t)}
+                    }
+                    IBinOp::Mul => {
+                        paste::paste! { Val::$T([< Atomic $s:upper >]::from_ptr(mem.as_mut_ptr() as *mut $s).fetch_and((c.[<unwrap_ $T:lower>]() as $s), portable_atomic::Ordering::SeqCst) as $t)}
+                    }
+                    IBinOp::Div(_) => {
+                        paste::paste! { Val::$T([< Atomic $s:upper >]::from_ptr(mem.as_mut_ptr() as *mut $s).fetch_or((c.[<unwrap_ $T:lower>]() as $s), portable_atomic::Ordering::SeqCst) as $t)}
+                    }
+                    _ => {
+                        Err(trap())?
+                    }
+                }
+            
+            }
+        }
+    }
+        let c = match (t, n, s) {
+            (NumType::I32, 32, Sx::U) => convert!(I32, u32, u32),
+            (NumType::I32, 16, Sx::U) => convert!(I32, u32, u16),
+            (NumType::I32, 16, Sx::S) => convert!(I32, u32, i16),
+            (NumType::I32, 8, Sx::U) => convert!(I32, u32, u8),
+            (NumType::I32, 8, Sx::S) => convert!(I32, u32, i8),
+            (NumType::I64, 64, Sx::U) => convert!(I64, u64, u64),
+            (NumType::I64, 32, Sx::U) => convert!(I64, u64, u32),
+            (NumType::I64, 32, Sx::S) => convert!(I64, u64, i32),
+            (NumType::I64, 16, Sx::U) => convert!(I64, u64, u16),
+            (NumType::I64, 16, Sx::S) => convert!(I64, u64, i16),
+            (NumType::I64, 8, Sx::U) => convert!(I64, u64, u8),
+            (NumType::I64, 8, Sx::S) => convert!(I64, u64, i8),
+            #[cfg(feature = "float-types")]
+            (NumType::F32, 32, _) => convert!(F32, u32, u32),
+            #[cfg(feature = "float-types")]
+            (NumType::F64, 64, _) => convert!(F64, u64, u64),
+            _ => unreachable!(),
+        };
+        self.push_value(c);
+        Ok(())
+    }
+
+    fn atomic_load(
+        &mut self, mem: &mut Memory<'m>, t: NumType, n: usize, s: Sx, m: MemArg,
+    ) -> Result<(), Error> {
+        let i = self.pop_value().unwrap_i32();
+        let mem = match self.mem_slice(mem, m, i, n / 8) {
+            None => return Err(trap()),
+            Some(x) => x,
+        };
+        macro_rules! convert {
+            ($T:ident, $t:ident, $s:ident) => {
+               unsafe {
+                    paste::paste! { Val::$T([< Atomic $s:upper >]::from_ptr(mem.as_mut_ptr() as *mut $s).load(portable_atomic::Ordering::SeqCst) as $t)}
+                }
+            };
+        }
+        let c = match (t, n, s) {
+            (NumType::I32, 32, Sx::U) => convert!(I32, u32, u32),
+            (NumType::I32, 16, Sx::U) => convert!(I32, u32, u16),
+            (NumType::I32, 16, Sx::S) => convert!(I32, u32, i16),
+            (NumType::I32, 8, Sx::U) => convert!(I32, u32, u8),
+            (NumType::I32, 8, Sx::S) => convert!(I32, u32, i8),
+            (NumType::I64, 64, Sx::U) => convert!(I64, u64, u64),
+            (NumType::I64, 32, Sx::U) => convert!(I64, u64, u32),
+            (NumType::I64, 32, Sx::S) => convert!(I64, u64, i32),
+            (NumType::I64, 16, Sx::U) => convert!(I64, u64, u16),
+            (NumType::I64, 16, Sx::S) => convert!(I64, u64, i16),
+            (NumType::I64, 8, Sx::U) => convert!(I64, u64, u8),
+            (NumType::I64, 8, Sx::S) => convert!(I64, u64, i8),
+            #[cfg(feature = "float-types")]
+            (NumType::F32, 32, _) => convert!(F32, u32, u32),
+            #[cfg(feature = "float-types")]
+            (NumType::F64, 64, _) => convert!(F64, u64, u64),
+            _ => unreachable!(),
+        };
+        self.push_value(c);
+        Ok(())
+    }
+
+    fn atomic_store(
+        &mut self, mem: &mut Memory<'m>, t: NumType, n: usize, m: MemArg,
+    ) -> Result<(), Error> {
+        let c = self.pop_value();
+        let i = self.pop_value().unwrap_i32();
+        let mem = match self.mem_slice(mem, m, i, n / 8) {
+            None => return Err(trap()),
+            Some(x) => x,
+        };
+        macro_rules! convert {
+            ($s:ident, $t:ident) => {
+                unsafe {
+                    
+                    let to_store = paste::paste!{ (c.[<unwrap_ $s>]() as $t) as $s };
+                    #[cfg(feature = "debug")]
+                    println!("atomic store of {:#x} with s: {}", to_store, "$s");
+                    
+                    paste::paste! { [< Atomic $t:upper >]::from_ptr(mem.as_mut_ptr() as *mut $t).store((c.[<unwrap_ $s>]() as $t),portable_atomic::Ordering::SeqCst) }
+                }
+                // paste::paste! {
+                //     mem.copy_from_slice(&(c.[<unwrap_ $s>]() as $t).to_le_bytes())
+                // }
+            };
+        }
+        match (t, n) {
+            (NumType::I32, 32) => convert!(i32, u32),
+            (NumType::I32, 16) => convert!(i32, u16),
+            (NumType::I32, 8) => convert!(i32, u8),
+            (NumType::I64, 64) => convert!(i64, u64),
+            (NumType::I64, 32) => convert!(i64, u32),
+            (NumType::I64, 16) => convert!(i64, u16),
+            (NumType::I64, 8) => convert!(i64, u8),
+            _ => unreachable!(),
+        }
         Ok(())
     }
 

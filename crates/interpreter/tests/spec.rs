@@ -489,7 +489,7 @@ test!(utf8_invalid_encoding, "utf8-invalid-encoding");
 
 test!(
     // Not fully implemented yet, ignoring.
-    #[ignore]
+    // #[ignore]
     "threads",
     atomic
 );
